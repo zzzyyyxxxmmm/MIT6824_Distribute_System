@@ -148,7 +148,7 @@ func TestSequentialSingle(t *testing.T) {
 	mr.Wait()
 	check(t, mr.files)
 	checkWorker(t, mr.stats)
-	cleanup(mr)
+	//cleanup(mr)
 }
 
 func TestSequentialMany(t *testing.T) {
