@@ -257,7 +257,26 @@ v := <-ch  // Receive from ch, and
 好了通过分析上面的内容，代码的基本流程应该清楚了，首先为每个task构件好DoTaskArgs参数，然后注册worker，然后发送，等待获取结果，这些都是在异步条件下完成的
 
 注意要等待上一阶段完成才能开始下一个阶段
+这部分功能我们使用sync.WaitGroup。WaitGroup顾名思义，就是用来等待一组操作完成的。WaitGroup内部实现了一个计数器，用来记录未完成的操作个数，它提供了三个方法，Add()用来添加计数。Done()用来在操作结束时调用，使计数减一。Wait()用来等待所有的操作结束，即计数变为0，该函数会在计数不为0时等待，在计数为0时立即返回。
 
+示例：
+```go
+func main() {
+    var wg sync.WaitGroup
+    wg.Add(2) // 因为有两个动作，所以增加2个计数
+    go func() {
+        fmt.Println("Goroutine 1")
+        wg.Done() // 操作完成，减少一个计数
+    }()
+    go func() {
+        fmt.Println("Goroutine 2")
+        wg.Done() // 操作完成，减少一个计数
+    }()
+    wg.Wait() // 等待，直到计数为0
+}
+```
+
+代码：
 ```go
 var wg sync.WaitGroup
 wg.Add(ntasks)
@@ -280,28 +299,6 @@ for i := 0; i < ntasks; i++ {
 In this part you will make the master handle failed workers. MapReduce makes this relatively easy because workers don't have persistent state. If a worker fails, any RPCs that the master issued to that worker will fail (e.g., due to a timeout). Thus, if the master's RPC to the worker fails, the master should re-assign the task given to the failed worker to another worker.
 
 其实就是失败重发机制
-
-使用sync.WaitGroup。WaitGroup顾名思义，就是用来等待一组操作完成的。WaitGroup内部实现了一个计数器，用来记录未完成的操作个数，它提供了三个方法，Add()用来添加计数。Done()用来在操作结束时调用，使计数减一。Wait()用来等待所有的操作结束，即计数变为0，该函数会在计数不为0时等待，在计数为0时立即返回。
-
-```go
-func main() {
-
-    var wg sync.WaitGroup
-
-    wg.Add(2) // 因为有两个动作，所以增加2个计数
-    go func() {
-        fmt.Println("Goroutine 1")
-        wg.Done() // 操作完成，减少一个计数
-    }()
-
-    go func() {
-        fmt.Println("Goroutine 2")
-        wg.Done() // 操作完成，减少一个计数
-    }()
-
-    wg.Wait() // 等待，直到计数为0
-}
-```
 
 这里不管成功失败都要释放worker
 
