@@ -177,3 +177,155 @@ doReduce 其实已经和doMap差不多了
 2. 排序
 3. 写入
 
+# Part III: Distributing MapReduce tasks
+
+这部分就是把之前Sequential执行的转换成分布式执行
+
+之前的这段：
+```go
+go mr.run(jobName, files, nreduce, func(phase jobPhase) {
+		switch phase {
+		case mapPhase:
+			for i, f := range mr.files {
+				doMap(mr.jobName, i, f, mr.nReduce, mapF)
+			}
+		case reducePhase:
+			for i := 0; i < mr.nReduce; i++ {
+				doReduce(mr.jobName, i, len(mr.files), reduceF)
+			}
+		}
+	}, func() {
+		mr.stats = []int{len(files) + nreduce}
+	})
+```
+
+在一个for循环里依次执行，这次我们需要将这些依次执行的代码变成在不同机器上并发执行的代码
+
+To coordinate the parallel execution of tasks, we will use a special master thread, which hands out work to the workers and waits for them to finish. To make the lab more realistic, the master should only communicate with the workers via RPC. We give you the worker code (mapreduce/worker.go), the code that starts the workers, and code to deal with RPC messages (mapreduce/common_rpc.go).
+
+上面这句话告诉我们，Master会将task分给不同的worker来执行，由于worker在不同的机器上，因此我们需要RPC来进行通信
+
+看一下common_rpc.go
+```go
+// DoTaskArgs holds the arguments that are passed to a worker when a job is
+// scheduled on it.
+type DoTaskArgs struct {
+	JobName    string
+	File       string   // the file to process
+	Phase      jobPhase // are we in mapPhase or reducePhase?
+	TaskNumber int      // this task's index in the current phase
+
+	// NumOtherPhase is the total number of tasks in other phase; mappers
+	// need this to compute the number of output bins, and reducers needs
+	// this to know how many input files to collect.
+	NumOtherPhase int
+}
+```
+
+可以看到上面就是我们通过master发送给worker的信息
+
+```go
+// call() sends an RPC to the rpcname handler on server srv
+// with arguments args, waits for the reply, and leaves the
+// reply in reply. the reply argument should be the address
+// of a reply structure.
+func call(srv string, rpcname string,
+	args interface{}, reply interface{}) bool {
+	}
+```
+而call方法就是具体的发送方法, 指定发送的worker，参数
+
+Look at run() in master.go. It calls your schedule() to run the map and reduce tasks, then calls merge() to assemble the per-reduce-task outputs into a single output file. schedule only needs to tell the workers the name of the original input file (mr.files[task]) and the task task; each worker knows from which files to read its input and to which files to write its output. The master tells the worker about a new task by sending it the RPC call Worker.DoTask, giving a DoTaskArgs object as the RPC argument.
+
+这段话告诉了我们基本的执行流程
+1. schedule(mapPhase)
+2. schedule(reducePhase)
+3. mr.merge()
+
+发送DoTaskArgs给worker,等待返回所有结果，然后执行下一个阶段，等待，合并
+
+When a worker starts, it sends a Register RPC to the master. mapreduce.go already implements the master's Master.Register RPC handler for you, and passes the new worker's information to mr.registerChannel. Your schedule should process new worker registrations by reading from this channel.
+
+这段告诉我们需要通过channel注册新的worker，worker的结果也是通过channel返回的
+
+```go
+ch <- v    // Send v to channel ch.
+v := <-ch  // Receive from ch, and
+		   // assign value to v.
+```
+
+好了通过分析上面的内容，代码的基本流程应该清楚了，首先为每个task构件好DoTaskArgs参数，然后注册worker，然后发送，等待获取结果，这些都是在异步条件下完成的
+
+注意要等待上一阶段完成才能开始下一个阶段
+
+```go
+var wg sync.WaitGroup
+wg.Add(ntasks)
+execute := func(worker string, taskId int) {
+	args := DoTaskArgs{mr.jobName, mr.files[taskId], phase, taskId, nios}
+	result := call(worker, "Worker.DoTask", args, nil)
+	if result {
+		wg.Done()
+	}
+	mr.registerChannel <- worker
+}
+
+for i := 0; i < ntasks; i++ {
+	worker := <-mr.registerChannel
+	go execute(worker, i)
+}
+```
+
+# Part IV: Handling worker failures
+In this part you will make the master handle failed workers. MapReduce makes this relatively easy because workers don't have persistent state. If a worker fails, any RPCs that the master issued to that worker will fail (e.g., due to a timeout). Thus, if the master's RPC to the worker fails, the master should re-assign the task given to the failed worker to another worker.
+
+其实就是失败重发机制
+
+使用sync.WaitGroup。WaitGroup顾名思义，就是用来等待一组操作完成的。WaitGroup内部实现了一个计数器，用来记录未完成的操作个数，它提供了三个方法，Add()用来添加计数。Done()用来在操作结束时调用，使计数减一。Wait()用来等待所有的操作结束，即计数变为0，该函数会在计数不为0时等待，在计数为0时立即返回。
+
+```go
+func main() {
+
+    var wg sync.WaitGroup
+
+    wg.Add(2) // 因为有两个动作，所以增加2个计数
+    go func() {
+        fmt.Println("Goroutine 1")
+        wg.Done() // 操作完成，减少一个计数
+    }()
+
+    go func() {
+        fmt.Println("Goroutine 2")
+        wg.Done() // 操作完成，减少一个计数
+    }()
+
+    wg.Wait() // 等待，直到计数为0
+}
+```
+
+这里不管成功失败都要释放worker
+
+失败的时候要重新选择worker
+
+```go
+var wg sync.WaitGroup
+wg.Add(ntasks)
+var execute func(worker string, taskNum int)
+execute = func(worker string, taskId int) {
+	args := DoTaskArgs{mr.jobName, mr.files[taskId], phase, taskId, nios}
+	result := call(worker, "Worker.DoTask", args, nil)
+	if result {
+		wg.Done()
+	} else {
+		newWorker := <-mr.registerChannel
+		go execute(newWorker, taskId)
+	}
+	mr.registerChannel <- worker
+}
+for i := 0; i < ntasks; i++ {
+	worker := <-mr.registerChannel
+	go execute(worker, i)
+}
+wg.Wait()
+fmt.Printf("Schedule: %v phase done\n", phase)
+```
