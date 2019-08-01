@@ -17,3 +17,7 @@
 ## [Part IV: Handling worker failures](https://github.com/zzzyyyxxxmmm/MIT6824_Distribute_System/tree/master/src/mapreduce#part-iv-handling-worker-failures)
 
 失败重传机制, 对于失败的任务重新执行
+
+## [Part V: Inverted index generation](https://github.com/zzzyyyxxxmmm/MIT6824_Distribute_System/tree/master/src/mapreduce#part-v-inverted-index-generatio)
+
+mapreduce的应用，为每个单词简历索引
