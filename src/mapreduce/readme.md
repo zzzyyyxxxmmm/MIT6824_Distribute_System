@@ -72,9 +72,10 @@ func TestSequentialMany(t *testing.T) {
 }
 ```
 
-里面创建了一个Sequential来运行，makeInputs(5)就是创建一些包含数字的以824开头的文件并返回文件名，MapFunc就是将string序列split成一个一个单词的key value对
+里面创建了一个Sequential来运行，makeInputs(5)就是创建一些包含数字的以824开头的文件并返回文件名，
+mapF就是mapreduce中的map操作，如果是count word，那么mapF就是map一个单词出现的频率(mapF("apple","1"))，如果是Inverted Index,那么mapF就是mapF("apple","fruit.txt"),在Sequential方法里mapF啥也没干mapF("apple","")
 
-再来看一下Sequential方法：
+Sequential方法：
 ```go
 // Sequential runs map and reduce tasks sequentially, waiting for each task to
 // complete before scheduling the next.
@@ -99,8 +100,29 @@ func Sequential(jobName string, files []string, nreduce int,
 	})
 	return
 }
+
+func (mr *Master) run(jobName string, files []string, nreduce int,
+	schedule func(phase jobPhase),
+	finish func(),
+) {
+	mr.jobName = jobName
+	mr.files = files
+	mr.nReduce = nreduce
+
+	fmt.Printf("%s: Starting Map/Reduce task %s\n", mr.address, mr.jobName)
+
+	schedule(mapPhase)
+	schedule(reducePhase)
+	finish()
+	mr.merge()
+
+	fmt.Printf("%s: Map/Reduce task completed\n", mr.address)
+
+	mr.doneChannel <- true
+}
 ```
-这个方法里创建了一个类似与Runnable的Master来进行工作，工作经历了mapPhase和reducePhase阶段，那么doMap就是在这里进行的。
+这个方法里创建了一个类似与Runnable的Master来进行工作，run方法里依次执行了map和reduce,最后合并，在Sequential里，schedule是自己定义的，可以看到是由for循环同步执行的.
+
 
 在common_map.go文件里：
 ```go
@@ -115,12 +137,34 @@ func doMap(
 }
 ```
 
-传入了之前读到的文件，有个mapF方法可以将文件分成单个的word key value对，nReduce告诉我们需要将读到的文件分为几个部分
+在论文中：
+``
+map(String key, String value):
+// key: document name
+// value: document contents
+for each word w in value:
+EmitIntermediate(w, "1");
 
+reduce(String key, Iterator values):
+// key: a word
+// values: a list of counts
+int result = 0;
+for each v in values:
+result += ParseInt(v);
+Emit(AsString(result));
+``
+
+map操作是将读到的内容依次进行map，然后产生中间文件，在这里中间文件储存的是key-value对，不过由于test里提供的mapF没做特别的映射，因此最终产生的文件应该如下：
+``
+{"apple",""}
+{"orange",""}
+{"pear",""}
+...
+``
 
 总之，doMap应该做的工作：
-1. 建立nReduce个中间文件
-2. 将读入的word 映射，并且保存在中间文件中
+1. 为每个文件建立nReduce个中间文件
+2. 将读入的word映射，并且保存在中间文件中
 
 ### 读取文件
 读取文件后通过mapF方法将其转化为键值对
@@ -172,14 +216,76 @@ for _, file := range file {
 
 ## doReduce
 
+
 doReduce 其实已经和doMap差不多了
-1. 读取中间文件
+1. 读取中间文件，纵向合并（外层循环是reduce）
 2. 排序
 3. 写入
+
+
+举个例子：
+
+``
+1-0.txt:
+"apple","1"
+"cat","2"
+2-0.txt
+"apple","2"
+
+那么首先将两个文件根据key合并即：
+"apple": {"1","2"}
+"cat": {"2"}
+``
+
+然后reduceF, 即将每个key对应的value[]合并，如果是count word，那么就是相加，如果是inverted index，就是join
+```go
+keyValues := make(map[string][]string)
+	for i := 0; i < nMap; i++ {
+		file, err := os.Open(reduceName(jobName, i, reduceTaskNumber))
+		if err != nil {
+			log.Fatal("create intermediate file failed", reduceName(jobName, i, reduceTaskNumber))
+		}
+		var kv KeyValue
+		dec := json.NewDecoder(file)
+		err = dec.Decode(&kv)
+		for err == nil {
+			keyValues[kv.Key] = append(keyValues[kv.Key], kv.Value)
+			err = dec.Decode(&kv)
+		}
+		file.Close()
+	}
+
+	var keys []string
+	for k := range keyValues {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	outFile := mergeName(jobName, reduceTaskNumber)
+	out, err := os.Create(outFile)
+	if err != nil {
+		log.Fatal("failed to create outfile", outFile)
+	}
+	enc := json.NewEncoder(out)
+	for _, k := range keys {
+		v := reduceF(k, keyValues[k])
+		err = enc.Encode(KeyValue{k, v})
+		if err != nil {
+			log.Fatal("failed to encode", KeyValue{k, v})
+		}
+	}
+	out.Close()
+```
 
 # Part III: Distributing MapReduce tasks
 
 这部分就是把之前Sequential执行的转换成分布式执行
+
+代码执行流程:
+1. 创建master
+2. 创建worker并通过master注册
+3. 配置好worker需要执行的内容，然后通过rpc的方式发送给worker执行
+4. worker执行完返回结果，检验正确性
 
 之前的这段：
 ```go
