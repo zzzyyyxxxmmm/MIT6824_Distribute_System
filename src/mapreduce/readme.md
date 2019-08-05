@@ -138,7 +138,7 @@ func doMap(
 ```
 
 在论文中：
-``
+```go
 map(String key, String value):
 // key: document name
 // value: document contents
@@ -152,15 +152,15 @@ int result = 0;
 for each v in values:
 result += ParseInt(v);
 Emit(AsString(result));
-``
+```
 
 map操作是将读到的内容依次进行map，然后产生中间文件，在这里中间文件储存的是key-value对，不过由于test里提供的mapF没做特别的映射，因此最终产生的文件应该如下：
-``
+```json
 {"apple",""}
 {"orange",""}
 {"pear",""}
 ...
-``
+```
 
 总之，doMap应该做的工作：
 1. 为每个文件建立nReduce个中间文件
@@ -225,17 +225,18 @@ doReduce 其实已经和doMap差不多了
 
 举个例子：
 
-``
+```json
 1-0.txt:
 "apple","1"
 "cat","2"
+
 2-0.txt
 "apple","2"
 
 那么首先将两个文件根据key合并即：
 "apple": {"1","2"}
 "cat": {"2"}
-``
+```
 
 然后reduceF, 即将每个key对应的value[]合并，如果是count word，那么就是相加，如果是inverted index，就是join
 ```go
@@ -354,6 +355,7 @@ When a worker starts, it sends a Register RPC to the master. mapreduce.go alread
 
 这段告诉我们需要通过channel注册新的worker，worker的结果也是通过channel返回的
 
+如何使用channel
 ```go
 ch <- v    // Send v to channel ch.
 v := <-ch  // Receive from ch, and
