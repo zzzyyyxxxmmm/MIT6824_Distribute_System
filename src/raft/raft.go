@@ -17,8 +17,13 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "labrpc"
+import (
+	"labrpc"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
 // import "bytes"
 // import "encoding/gob"
@@ -105,10 +110,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here.
-	Term         int
-	CandidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term        int
+	CandidateId int
 }
 
 //
@@ -120,11 +123,40 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term int
+}
+
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+
+	if args.Term < rf.currentTerm {
+
+	} else {
+		reply.VoteGranted = true
+		rf.state = Follower
+	}
+
+}
+
+//heartbeat
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.Term > rf.currentTerm {
+		rf.beFollower(args.Term)
+	}
+
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -149,6 +181,11 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -168,6 +205,65 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	return index, term, isLeader
+}
+
+func (rf *Raft) startElection() {
+
+	args := RequestVoteArgs{
+		rf.currentTerm,
+		rf.me,
+	}
+	var votes int32 = 1
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(idx int) {
+			reply := &RequestVoteReply{}
+			ret := rf.sendRequestVote(idx, args, reply)
+			if ret {
+				if reply.VoteGranted {
+					atomic.AddInt32(&votes, 1)
+				} //If votes received from majority of servers: become leader
+				if atomic.LoadInt32(&votes) > int32(len(rf.peers)/2) {
+					rf.beLeader()
+				}
+			}
+		}(i)
+	}
+}
+
+func (rf *Raft) beLeader() {
+	rf.state = Leader
+}
+
+func (rf *Raft) beFollower(newTerm int) {
+	rf.currentTerm = newTerm
+	rf.state = Follower
+}
+
+func (rf *Raft) beCandidate() {
+	rf.state = Candidate
+}
+
+func (rf *Raft) sendAppendLog() {
+	args := AppendEntriesArgs{
+		rf.currentTerm,
+		rf.me,
+	}
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+
+		go func(idx int) {
+			reply := &AppendEntriesReply{}
+			ret := rf.sendAppendEntries(idx, args, reply)
+			if ret {
+
+			}
+		}(i)
+	}
 }
 
 //
@@ -197,11 +293,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
 	// Your initialization code here.
-
+	rf.state = Follower
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	heartbeatTime := time.Duration(100) * time.Millisecond
 
+	go func() {
+		for {
+			electionTime := time.Duration(rand.Intn(200)+300) * time.Millisecond
+			switch rf.state {
+			case Follower, Candidate:
+				time.Sleep(electionTime)
+				rf.startElection()
+			case Leader:
+				time.Sleep(heartbeatTime)
+				rf.sendAppendLog()
+			}
+		}
+	}()
 	return rf
 }
