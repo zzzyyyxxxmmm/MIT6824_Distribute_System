@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -63,6 +64,8 @@ type Raft struct {
 
 	state       State
 	currentTerm int
+
+	appendLogCh chan bool
 }
 
 // return currentTerm and whether this server
@@ -151,12 +154,14 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 //heartbeat
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	if args.Term > rf.currentTerm {
 		rf.beFollower(args.Term)
 	}
 
 	reply.Term = rf.currentTerm
+
+	send(rf.appendLogCh)
 }
 
 //
@@ -223,9 +228,10 @@ func (rf *Raft) startElection() {
 			ret := rf.sendRequestVote(idx, args, reply)
 			if ret {
 				if reply.VoteGranted {
+
 					atomic.AddInt32(&votes, 1)
 				} //If votes received from majority of servers: become leader
-				if atomic.LoadInt32(&votes) > int32(len(rf.peers)/2) {
+				if atomic.LoadInt32(&votes) >= int32(len(rf.peers)/2) {
 					rf.beLeader()
 				}
 			}
@@ -242,8 +248,11 @@ func (rf *Raft) beFollower(newTerm int) {
 	rf.state = Follower
 }
 
-func (rf *Raft) beCandidate() {
+func (rf *Raft) beCandidate() { //Reset election timer are finished in caller
 	rf.state = Candidate
+	rf.currentTerm++ //Increment currentTerm
+	//ask for other's vote
+	go rf.startElection() //Send RequestVote RPCs to all other servers
 }
 
 func (rf *Raft) sendAppendLog() {
@@ -297,6 +306,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.appendLogCh = make(chan bool, 1)
 	heartbeatTime := time.Duration(100) * time.Millisecond
 
 	go func() {
@@ -304,13 +314,29 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			electionTime := time.Duration(rand.Intn(200)+300) * time.Millisecond
 			switch rf.state {
 			case Follower, Candidate:
-				time.Sleep(electionTime)
-				rf.startElection()
+				select {
+				case <-rf.appendLogCh:
+					fmt.Println("recieve appendLogCh")
+				case <-time.After(electionTime):
+					fmt.Println("start election")
+					rf.beCandidate()
+				}
 			case Leader:
+				fmt.Println("send heart")
 				time.Sleep(heartbeatTime)
+
 				rf.sendAppendLog()
 			}
 		}
 	}()
 	return rf
+}
+
+//Helper function
+func send(ch chan bool) {
+	select {
+	case <-ch: //if already set, consume it then resent to avoid block
+	default:
+	}
+	ch <- true
 }

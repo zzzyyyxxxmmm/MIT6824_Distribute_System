@@ -301,6 +301,95 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 ```
+```go
+go test -run Ini
+```
+ok，现在执行，代码已经可以通过第一个test的了
 
-ok，现在执行，代码已经可以通过了
+虽然这里通过了，但是由于test的设计问题，一旦出现leader就会成功返回，而我们需要的是能够稳定存在的leader，希望heartbeat能够正常工作，但可以看到，即使成为了Follower，仍旧会进行选举，因此我们需要再加判断, 另外，投完票之后就不能再给其他人投票了，因此需要记录票投给谁了
+
+## reElection
+
+接下来我们看一下第二个test
+
+```go
+func TestReElection(t *testing.T) {
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test: election after network failure ...\n")
+
+	leader1 := cfg.checkOneLeader()
+
+	// if the leader disconnects, a new one should be elected.
+	cfg.disconnect(leader1)
+	cfg.checkOneLeader()
+
+	// if the old leader rejoins, that shouldn't
+	// disturb the old leader.
+	cfg.connect(leader1)
+	leader2 := cfg.checkOneLeader()
+
+	// if there's no quorum, no leader should
+	// be elected.
+	cfg.disconnect(leader2)
+	cfg.disconnect((leader2 + 1) % servers)
+	time.Sleep(2 * RaftElectionTimeout)
+	cfg.checkNoLeader()
+
+	// if a quorum arises, it should elect a leader.
+	cfg.connect((leader2 + 1) % servers)
+	cfg.checkOneLeader()
+
+	// re-join of last node shouldn't prevent leader from existing.
+	cfg.connect(leader2)
+	cfg.checkOneLeader()
+
+	fmt.Printf("  ... Passed\n")
+}
+```
+
+在上面代码中，出现了4种可能会出现的failure:
+1. Leader失联，需要重新选举
+2. Leader重新连接，不影响当前的Leader
+3. 人数不够的话，不可以选出Leader
+4. 如果人数又够的话，重新选举
+
+首先看下disconnect之后会有什么反应：
+
+```go
+func (cfg *config) disconnect(i int) {
+	// fmt.Printf("disconnect(%d)\n", i)
+
+	cfg.connected[i] = false
+
+	// outgoing ClientEnds
+	for j := 0; j < cfg.n; j++ {
+		if cfg.endnames[i] != nil {
+			endname := cfg.endnames[i][j]
+			cfg.net.Enable(endname, false)
+		}
+	}
+
+	// incoming ClientEnds
+	for j := 0; j < cfg.n; j++ {
+		if cfg.endnames[j] != nil {
+			endname := cfg.endnames[j][i]
+			cfg.net.Enable(endname, false)
+		}
+	}
+}
+```
+
+```go
+// enable/disable a ClientEnd.
+func (rn *Network) Enable(endname interface{}, enabled bool) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.enabled[endname] = enabled
+}
+```
+cfg.net.Enable(endname, false)方法会使得labrpc下enabled为false，因此发送过去的信息无法被接收，其实就相当于停止发送heartbeat
 
