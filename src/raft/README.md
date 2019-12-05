@@ -46,4 +46,13 @@ additional restriction on the election mechanism described in Section 5.2.
 
 # Task I Implement leader election and heartbeats
 
+一个核心: If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower. 非常之关键, 用于解决网络内的节点断开和重连.
+
+如果某个Leader掉了, 重连了, 那么现在的Leader的term一定会比旧的Leader的term要大, 旧term依然是leader, 依然会发送heartbeat, 当他发现返回的term比自己的大,
+说明那个server变成了leader, 自己则需要变成follower
+
+### 难点:
+
+
+
 

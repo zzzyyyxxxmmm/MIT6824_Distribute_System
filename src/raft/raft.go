@@ -25,6 +25,7 @@ import (
 	"time"
 	log "github.com/inconshreveable/log15"
 	"sync/atomic"
+	"sort"
 )
 
 // import "bytes"
@@ -61,6 +62,7 @@ type Raft struct {
 
 	appendLogCh chan bool
 	voteCh      chan bool
+	applyCh chan ApplyMsg
 }
 
 type Log struct {
@@ -142,9 +144,6 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
-/*
-reply的term是用来做什么的???
- */
 type RequestVoteReply struct {
 	Term        int
 	VoteGranted bool
@@ -155,43 +154,71 @@ func (raft *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	raft.mu.Lock()
 	defer raft.mu.Unlock()
 	//reply false if term < currentTerm
-	reply.VoteGranted = false
 
-	/*
-	If a candidate or leader discovers that its term is out of date, it immediately reverts to follower state
-	 */
-	if (raft.State == Candidate || raft.State == Leader) && raft.CurrentTerm < args.Term {
+	if raft.CurrentTerm < args.Term {
+		log.Info("requestVote stage", "id", raft.me, "org", raft.State, "src", "follower")
 		raft.BeFollower(args.Term)
-		return
 	}
+
+	reply.Term = raft.CurrentTerm
+	reply.VoteGranted = false
 
 	if args.Term < raft.CurrentTerm {
 		return
 	}
 
-	//if votedFor is null or candidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote -> candidate.log >= rf.log
-	// enter to vote
-	// A server remains in f
-	if (raft.VoteFor == -1 || raft.VoteFor == args.CandidateId) && args.LastLogIndex >= raft.GetLastLogIndex() {
-		log.Info("RequestVote", "message", raft.me, " vote to ", args.CandidateId)
+	if raft.VoteFor == -1 || raft.VoteFor == args.CandidateId {
+		log.Info("RequestVote", "id", raft.me, " vote to ", args.CandidateId)
 		reply.VoteGranted = true
 		reply.Term = raft.CurrentTerm
 		send(raft.voteCh)
 	}
+
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	//1. reply false if term < currentTerm
+	if args.Term > rf.CurrentTerm {
+		rf.BeFollower(args.Term)
+	}
+
+	send(rf.appendLogCh) //只要发送了就一定会被刷新
+
 	reply.Success = false
 	reply.Term = rf.CurrentTerm
-	rf.CurrentTerm=args.Term
 
-	//fmt.Println(args.Term,rf.CurrentTerm)
-	if args.Term < rf.CurrentTerm {
+	//2. Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+	if args.PrevLogIndex>=len(rf.Log){
 		return
 	}
+
+	//3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
+	preLogTerm := rf.Log[args.PrevLogIndex].Term
+	if preLogTerm != args.PrevLogTerm {
+		return
+	}
+
+	//4. Append any new entries not already in the log
+	if len(args.Entries)>0{
+		rf.Log = append(rf.Log, args.Entries...)
+
+		}
+
+
+	//5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.CommitIndex {
+		rf.CommitIndex = min(args.LeaderCommit, len(rf.Log))
+		rf.updateLastApplied()
+	}
+
+	log.Info("follower start to replicate log", "follower", rf.me,"Log",rf.Log,"commitIndex",rf.CommitIndex,"lastApplied",rf.LastApplied)
+
 	reply.Success = true
-	send(rf.appendLogCh)
+
 }
 
 func (raft *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
@@ -204,24 +231,25 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-//
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-//
 func (raft *Raft) Start(command interface{}) (int, int, bool) {
+	raft.mu.Lock()
+	defer raft.mu.Unlock()
 	index := -1
-	term := -1
-	isLeader := true
+	term := raft.CurrentTerm
+	isLeader := raft.State == Leader
+	//If command received from client: append entry to local log, respond after entry applied to state machine (§5.3)
 
+	if isLeader {
+		log.Info("receive command", "src",raft.me,"command",command)
+		index = raft.GetLastLogIndex() + 1
+		newLog := Log{
+			raft.CurrentTerm,
+			command,
+		}
+		raft.Log = append(raft.Log, newLog)
+		raft.persist()
+		//raft.StartAppendLog()
+	}
 	return index, term, isLeader
 }
 
@@ -245,8 +273,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.State = Follower
 	rf.CurrentTerm = 1
 	rf.VoteFor = -1
-	rf.voteCh=make(chan bool ,1 )
-	rf.appendLogCh=make(chan bool, 1 )
+	rf.voteCh = make(chan bool, 1)
+	rf.appendLogCh = make(chan bool, 1)
+	rf.applyCh=applyCh
+
+	rf.CommitIndex=0
+	rf.LastApplied=0
+	rf.Log=make([]Log,1)	//first index is 1
+	rf.Log[0]=Log{
+		Term:-1,
+		Command:nil,
+	}
 
 	go func() {
 		for {
@@ -259,17 +296,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case Follower, Candidate:
 				select {
 				case <-time.After(electionTimeout):
-					log.Info("start election", "message: ", rf.me, "start election")
+					log.Info("start election", "id", rf.me, "term", rf.CurrentTerm+1)
 					rf.BeCandidate()
 				case <-rf.appendLogCh:
-					log.Info("election time refresh", "appendLogCh",rf.me)
+					log.Info("election time refresh", "appendLogCh", rf.me)
 				case <-rf.voteCh:
-					log.Info("election time refresh", "voteCh",rf.me)
+					log.Info("election time refresh", "voteCh", rf.me)
 				}
 
 			case Leader:
+				rf.StartAppendLog()
 				time.Sleep(time.Duration(100) * time.Millisecond)
-				//rf.StartAppendLog()
 			}
 
 		}
@@ -293,11 +330,12 @@ func (raft *Raft) startElection() {
 	}
 
 	var count int32 = 1;
-	for i := 0; i < len(raft.peers); i++ {
+	for i, _ := range raft.peers {
+
 		if i == raft.me {
 			continue
 		}
-
+		//log.Info("candidate send request vote to others","src",raft.me,"dst",i,"term",raft.CurrentTerm)
 		go func(id int) {
 			reply := RequestVoteReply{}
 			result := raft.sendRequestVote(id, arg, &reply)
@@ -309,14 +347,13 @@ func (raft *Raft) startElection() {
 					atomic.AddInt32(&count, 1)
 				}
 
-				if raft.State==Leader{
+				if raft.State == Leader {
 					return
 				}
 
 				if atomic.LoadInt32(&count) > int32(len(raft.peers)/2) {
 					log.Info("become leader", "message", raft.me)
 					raft.BeLeader()
-					go raft.StartAppendLog()
 					send(raft.voteCh)
 				}
 			}
@@ -329,36 +366,94 @@ func (raft *Raft) GetLastLogIndex() int {
 }
 func (raft *Raft) BeFollower(term int) {
 	raft.CurrentTerm = term
-	raft.mu.Lock()
 	raft.State = Follower
-	raft.mu.Unlock()
+	raft.VoteFor = -1
 }
 func (raft *Raft) BeLeader() {
 	raft.State = Leader
+
+	raft.NextIndex = make([]int, len(raft.peers))
+	raft.MatchIndex = make([]int, len(raft.peers))
+	for i := 0; i < len(raft.NextIndex); i++ { //initialized to leader last log index + 1
+		raft.NextIndex[i] = len(raft.Log)
+	}
 }
 func (raft *Raft) StartAppendLog() {
-	log.Info("start sending append log","",raft.me)
-	arg := AppendEntriesArgs{
-		Term:     raft.CurrentTerm,
-		LeaderId: raft.me,
-	}
+	log.Info("start sending append log", "leader", raft.me, "current term", raft.CurrentTerm)
 
-	for i:=0;i<len(raft.peers);i++{
+	log.Info("leader log information","log",raft.Log,"commitIndex",raft.CommitIndex,"lastApplied",raft.LastApplied)
+
+	for i, _ := range raft.peers {
 		if i == raft.me {
 			continue
 		}
-
 		go func(id int) {
-
 			for {
+				arg := AppendEntriesArgs{
+					Term:         raft.CurrentTerm,
+					LeaderId:     raft.me,
+					PrevLogIndex: raft.NextIndex[id]-1,
+					PrevLogTerm:  raft.Log[raft.NextIndex[id]-1].Term,
+					//Entries:      append(make([]Log, 0), raft.getLog(raft.getPrevLogIdx(id))),
+					LeaderCommit: raft.CommitIndex,
+				}
+				// If last log index >= nextIndex for a follower: send AppendEntries RPC with log entries RPC with log entries starting at nextIndex
+				// 这里需要解释一下初始情况, 初始是leader有一个nil Log, index是0, nextIndex是1, 在leader新加了一个log后, leader最后一个log index变成1 >= nextIndex, 因此
+				//需要将这个log复制, 但如果log是两个的话, 显然还是要根据nextIndex来复制
+				//但是在插入之前需要保证之前的Log是同步的
+				if len(raft.Log)-1 >= raft.NextIndex[id]{
+					arg.Entries=append(make([]Log,0),raft.Log[raft.NextIndex[id]])
+				} else {
+					arg.Entries=make([]Log,0)
+				}
+
+				if len(arg.Entries)>0{
+					log.Info("replicating log","arg",arg)
+				}
+
 				reply := AppendEntriesReply{}
-				raft.sendAppendEntries(id, &arg, &reply)
-				time.Sleep(time.Duration(100)*time.Millisecond)
+				ret := raft.sendAppendEntries(id, &arg, &reply)
+
+				if !ret {
+					time.Sleep(time.Duration(300) * time.Millisecond)
+					continue
+				}
+
+				// This is only heartbeat
+				if len(arg.Entries)==0{
+					return
+				}
+
+
+
+				//if successful: update nextIndex and matchIndex for follower
+				if reply.Success{
+					raft.MatchIndex[id]=raft.NextIndex[id]
+					raft.NextIndex[id]++
+
+					//If there exists an N such that N > commitIndex, a majority of matchIndex[i]>=N, and log[N].term==currentTerm
+					//set commitIndex=N
+					//如果至少有一半, 那么中位数一定是那个大于一半的
+					raft.MatchIndex[raft.me]=len(raft.Log)-1
+					copyMatchIndex := make([]int,len(raft.MatchIndex))
+					copy(copyMatchIndex,raft.MatchIndex)
+					sort.Sort(sort.Reverse(sort.IntSlice(copyMatchIndex)))
+					N := copyMatchIndex[len(copyMatchIndex)/2]
+					if N > raft.CommitIndex && raft.Log[N].Term == raft.CurrentTerm {
+						raft.CommitIndex = N
+						raft.updateLastApplied()
+					}
+				} else {
+					//If AppendEntries fails because of log inconsistency: decrement nextIndex and retry
+					raft.NextIndex[id]--
+					continue
+				}
+
+				return
 			}
 
 		}(i)
 	}
-
 }
 
 func send(ch chan bool) {
@@ -366,4 +461,21 @@ func send(ch chan bool) {
 	case <-ch: //if already set, consume it then resent to avoid block
 	default:}
 	ch <- true
+}
+
+func (raft *Raft) updateLastApplied() {
+	for raft.LastApplied < raft.CommitIndex {
+		raft.LastApplied++
+		curLog := raft.Log[raft.LastApplied]
+		applyMsg := ApplyMsg{ raft.LastApplied, curLog.Command,false,nil}
+		log.Info("command submitted", "src",raft.me)
+		raft.applyCh <- applyMsg
+	}
+}
+
+func min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
 }
