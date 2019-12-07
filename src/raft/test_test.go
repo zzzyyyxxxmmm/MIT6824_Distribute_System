@@ -13,7 +13,10 @@ import "fmt"
 import "time"
 import "math/rand"
 import "sync/atomic"
-import "sync"
+import (
+	"sync"
+	log "github.com/inconshreveable/log15"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -118,6 +121,7 @@ func TestFailAgree(t *testing.T) {
 	// follower network failure
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
+	fmt.Println("****************************disconnect",(leader+1)%servers)
 
 	// agree despite one failed server?
 	cfg.one(102, servers-1)
@@ -127,6 +131,7 @@ func TestFailAgree(t *testing.T) {
 	cfg.one(105, servers-1)
 
 	// failed server re-connected
+	fmt.Println("****************************reconnect",(leader+1)%servers)
 	cfg.connect((leader + 1) % servers)
 
 	// agree with full set of servers?
@@ -303,6 +308,8 @@ func TestRejoin(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
 
+	log.Info("*****leader1 disconnect","id",leader1)
+
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
@@ -315,13 +322,17 @@ func TestRejoin(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 
+	log.Info("******leader2 disconnect","id",leader2)
+
 	// old leader connected again
 	cfg.connect(leader1)
+	log.Info("*****leader1 reconnect","id",leader1)
 
 	cfg.one(104, 2)
 
 	// all together now
 	cfg.connect(leader2)
+	log.Info("*****leader2 reconnect","id",leader2)
 
 	cfg.one(105, servers)
 
