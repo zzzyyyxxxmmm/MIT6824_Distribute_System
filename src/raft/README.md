@@ -38,14 +38,14 @@ has applied a particular log entry to its state machine,
 then no other server may apply a different command
 for the same log index. Section 5.4 describes how
 Raft ensures this property; the solution involves an
-additional restriction on the election mechanism described in Section 5.2.
+additional restriction on the election mechanism described in Section 5.2. 
 
 # 思路
 
 首先这个[illustrated Raft guide](http://thesecretlivesofdata.com/raft/)提供了很好理解的执行过程，再配上论文里的的[figure2](https://github.com/zzzyyyxxxmmm/MIT6824_Distribute_System/tree/master/img/raft01.png)，我们应该可以开始对代码进行分析了.
 
 ## Election
-先描述一下整体流程:
+先描述一下整体流程:(写给自己温习的, 如果想要学习raft, 还是得读论文)
 1. 所有server开始进入follower状态, 某个节点超时后进入candidate状态, 给自己投一票, term+1, 并且发送requestVote给所有其他节点, 其他节点如果没有投票,
 并且term比candidate的term小, 就会给这个candidate投票, candiate如果收到大多数人的投票后就会进入leader状态.
 2. leader开始周期性发送heartbeat给所有其他节点, 其他节点如果是candidate状态并且term比leader的term小, 那么该candidate进入follower状态, 每次follower收到heartbeat,
@@ -66,7 +66,7 @@ additional restriction on the election mechanism described in Section 5.2.
 
 # 感想
 写了一个星期, TestFigure8Unreliable没过, 测试的应该是网络延迟的情况, 比较难debug, 目前还没发现到底出了什么问题, 其实还是要从头开始写, 
-细节情况很多, 论文里的figure2很重要, 每句话都是一个case, 细细体会.
+细节情况很多, 论文里的figure2很重要, 每句话都是一个case, 细细体会. 
 
 
 
